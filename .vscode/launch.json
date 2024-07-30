@@ -20,7 +20,11 @@
                     "coreIndex": 0,
                     "programBinary": "./target/thumbv8m.main-none-eabihf/debug/${workspaceFolderBasename}"
                 }
-            ]
+            ],
+            "env": {
+                "RUST_LOG": "info"
+            },
+            "consoleLogLevel": "Console"
         }
     ]
 }
