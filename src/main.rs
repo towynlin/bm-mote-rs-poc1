@@ -14,7 +14,7 @@ use embassy_stm32::spi::{Config as SPI_Config, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usb::{Driver, Instance};
 use embassy_stm32::{bind_interrupts, exti, peripherals, usb, Config};
-use embassy_time::Delay;
+use embassy_time::{Delay, Timer};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::Builder;
@@ -43,12 +43,13 @@ async fn main(_spawner: Spawner) {
     {
         use embassy_stm32::rcc::*;
         config.rcc.hsi = true;
+        config.rcc.msi = Some(MSIRange::RANGE_48MHZ);
         config.rcc.pll1 = Some(Pll {
-            source: PllSource::HSI, // 16 MHz
-            prediv: PllPreDiv::DIV1,
+            source: PllSource::MSIS, // 16 MHz
+            prediv: PllPreDiv::DIV3,
             mul: PllMul::MUL10,
-            divp: None,
-            divq: None,
+            divp: Some(PllDiv::DIV2), // 80 MHz
+            divq: Some(PllDiv::DIV2), // 80 MHz
             divr: Some(PllDiv::DIV1), // 160 MHz
         });
         config.rcc.sys = Sysclk::PLL1_R;
@@ -144,7 +145,7 @@ async fn main(_spawner: Spawner) {
 
     // Don't turn the clock to high, clock must fit within the system clock as we get a runtime panic.
     let mut spi_config = SPI_Config::default();
-    spi_config.frequency = Hertz(160_000_000);
+    spi_config.frequency = Hertz(20_000_000);
 
     let spe_spi: SpeSpi = Spi::new(
         p.SPI3,
@@ -162,9 +163,11 @@ async fn main(_spawner: Spawner) {
     let spe_reset_n = Output::new(p.PA0, Level::Low, Speed::Low);
 
     let _spe_pwr_en = Output::new(p.PH1, Level::High, Speed::Low);
+    Timer::after_millis(2000).await;
 
     let (device, runner) =
         embassy_net_adin1110::new(MAC, state, spe_spi, spe_int, spe_reset_n, true, false).await;
+    Timer::after_millis(2000).await;
     let eth_fut = runner.run();
 
     let mut r = Rng::new(p.RNG, Irqs);

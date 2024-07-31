@@ -13,7 +13,7 @@
             "chip": "STM32U575CIUxQ",
             "flashingConfig": {
                 "flashingEnabled": true,
-                "haltAfterReset": true
+                "haltAfterReset": false
             },
             "coreConfigs": [
                 {
