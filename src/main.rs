@@ -161,6 +161,8 @@ async fn main(_spawner: Spawner) {
 
     let spe_reset_n = Output::new(p.PA0, Level::Low, Speed::Low);
 
+    let _spe_pwr_en = Output::new(p.PH1, Level::High, Speed::Low);
+
     let (device, runner) =
         embassy_net_adin1110::new(MAC, state, spe_spi, spe_int, spe_reset_n, true, false).await;
     let eth_fut = runner.run();
