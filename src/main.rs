@@ -119,9 +119,9 @@ async fn echo<'d, T: Instance + 'd>(
 
 #[embassy_executor::task]
 async fn usb_serial_task(_spawner: Spawner, r: UsbResources) {
-    // Create the driver, from the HAL.
     let mut ep_out_buffer = [0u8; 256];
     let mut config = embassy_stm32::usb::Config::default();
+
     // Do not enable vbus_detection. This is a safe default that works in all boards.
     // However, if your USB device is self-powered (can stay powered on if USB is unplugged), you need
     // to enable vbus_detection to comply with the USB spec. If you enable it, the board
@@ -136,7 +136,6 @@ async fn usb_serial_task(_spawner: Spawner, r: UsbResources) {
         config,
     );
 
-    // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Sofar");
     config.product = Some("Bristlemouth mote");
@@ -166,16 +165,10 @@ async fn usb_serial_task(_spawner: Spawner, r: UsbResources) {
         &mut control_buf,
     );
 
-    // Create classes on the builder.
     let mut class = CdcAcmClass::new(&mut builder, &mut state, 64);
-
-    // Build the builder.
     let mut usb = builder.build();
-
-    // Run the USB device.
     let usb_fut = usb.run();
 
-    // Do stuff with the class!
     let echo_fut = async {
         loop {
             class.wait_connection().await;
@@ -205,10 +198,8 @@ async fn adin_spe_task(_spawner: Spawner, r: SpeResources, seed: u64) {
     let spe_spi_miso = r.pb4;
     let spe_spi_mosi = r.pb5;
 
-    // Don't turn the clock to high, clock must fit within the system clock as we get a runtime panic.
     let mut spi_config = SPI_Config::default();
     spi_config.frequency = Hertz(20_000_000);
-
     let spe_spi: SpeSpi = Spi::new(
         r.spi3,
         spe_spi_sclk,
@@ -219,13 +210,11 @@ async fn adin_spe_task(_spawner: Spawner, r: SpeResources, seed: u64) {
         spi_config,
     );
     let spe_spi = SpeSpiCs::new(spe_spi, spe_spi_cs_n, Delay).unwrap();
-
     let spe_int = exti::ExtiInput::new(r.pb8, r.exti8, Pull::None);
-
     let spe_reset_n = Output::new(r.pa0, Level::Low, Speed::Low);
-
     let _spe_pwr_en = Output::new(r.ph1, Level::High, Speed::Low);
 
+    // FIXME: Panicking here with SPI_CRC
     let (device, runner) =
         embassy_net_adin1110::new(MAC, state, spe_spi, spe_int, spe_reset_n, true, false).await;
     let eth_fut = runner.run();
@@ -246,7 +235,5 @@ async fn adin_spe_task(_spawner: Spawner, r: SpeResources, seed: u64) {
     ));
     let net_fut = stack.run();
 
-    // Run everything concurrently.
-    // If we had made everything `'static` above instead, we could do this using separate tasks instead.
     join(eth_fut, net_fut).await;
 }
