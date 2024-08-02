@@ -214,10 +214,9 @@ async fn adin_spe_task(_spawner: Spawner, r: SpeResources, seed: u64) {
     let spe_reset_n = Output::new(r.pa0, Level::Low, Speed::Low);
     let _spe_pwr_en = Output::new(r.ph1, Level::High, Speed::Low);
 
-    // FIXME: Panicking in here unwrapping AdinError::SPI_CRC when reading PHYID
-    // rx_buf in read_reg is consistently [0, 0, 0, 1, 0]
+    // TODO: embassy_net_adin1110 does not currently support Open Alliance SPI
     let (device, runner) =
-        embassy_net_adin1110::new(MAC, state, spe_spi, spe_int, spe_reset_n, true, false).await;
+        embassy_net_adin1110::new(MAC, state, spe_spi, spe_int, spe_reset_n, false, false).await;
     let eth_fut = runner.run();
 
     let ip_cfg = embassy_net::Config::ipv6_static(StaticConfigV6 {
