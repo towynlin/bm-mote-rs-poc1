@@ -1,10 +1,11 @@
 #![no_std]
 #![no_main]
 
+use assign_resources::assign_resources;
 use defmt::{panic, *};
 use defmt_rtt as _; // global logger
 use embassy_executor::Spawner;
-use embassy_futures::join::join4;
+use embassy_futures::join::join;
 use embassy_net::{Ipv6Address, Ipv6Cidr, Stack, StackResources, StaticConfigV6};
 use embassy_net_adin1110::{Device, ADIN1110};
 use embassy_stm32::gpio::{Level, Output, Pull, Speed};
@@ -14,7 +15,7 @@ use embassy_stm32::spi::{Config as SPI_Config, Spi};
 use embassy_stm32::time::Hertz;
 use embassy_stm32::usb::{Driver, Instance};
 use embassy_stm32::{bind_interrupts, exti, peripherals, usb, Config};
-use embassy_time::{Delay, Timer};
+use embassy_time::Delay;
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::driver::EndpointError;
 use embassy_usb::Builder;
@@ -23,6 +24,27 @@ use heapless::Vec;
 use panic_probe as _;
 use rand_core::RngCore;
 use static_cell::StaticCell;
+
+assign_resources! {
+    usb: UsbResources {
+        usb_otg_fs: USB_OTG_FS,
+        pa11: PA11,
+        pa12: PA12,
+    }
+    adin_spe: SpeResources {
+        exti8: EXTI8,
+        gpdma1_ch12: GPDMA1_CH12,
+        gpdma1_ch13: GPDMA1_CH13,
+        pa0: PA0,
+        pa15: PA15,
+        pb3: PB3,
+        pb4: PB4,
+        pb5: PB5,
+        pb8: PB8,
+        ph1: PH1,
+        spi3: SPI3,
+    }
+}
 
 bind_interrupts!(struct Irqs {
     OTG_FS => usb::InterruptHandler<peripherals::USB_OTG_FS>;
@@ -36,7 +58,7 @@ pub type SpeRst = Output<'static>;
 pub type Adin1110T = ADIN1110<SpeSpiCs>;
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
+async fn main(spawner: Spawner) {
     info!("Hello World!");
 
     let mut config = Config::default();
@@ -61,7 +83,42 @@ async fn main(_spawner: Spawner) {
     }
 
     let p = embassy_stm32::init(config);
+    let r = split_resources!(p);
 
+    spawner.spawn(usb_serial_task(spawner, r.usb)).unwrap();
+
+    let mut rng = Rng::new(p.RNG, Irqs);
+    let seed = rng.next_u64();
+    spawner
+        .spawn(adin_spe_task(spawner, r.adin_spe, seed))
+        .unwrap();
+}
+
+struct Disconnected {}
+
+impl From<EndpointError> for Disconnected {
+    fn from(val: EndpointError) -> Self {
+        match val {
+            EndpointError::BufferOverflow => panic!("Buffer overflow"),
+            EndpointError::Disabled => Disconnected {},
+        }
+    }
+}
+
+async fn echo<'d, T: Instance + 'd>(
+    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
+) -> Result<(), Disconnected> {
+    let mut buf = [0; 64];
+    loop {
+        let n = class.read_packet(&mut buf).await?;
+        let data = &buf[..n];
+        info!("data: {:x}", data);
+        class.write_packet(data).await?;
+    }
+}
+
+#[embassy_executor::task]
+async fn usb_serial_task(_spawner: Spawner, r: UsbResources) {
     // Create the driver, from the HAL.
     let mut ep_out_buffer = [0u8; 256];
     let mut config = embassy_stm32::usb::Config::default();
@@ -71,10 +128,10 @@ async fn main(_spawner: Spawner) {
     // has to support it or USB won't work at all. See docs on `vbus_detection` for details.
     config.vbus_detection = false;
     let driver = Driver::new_fs(
-        p.USB_OTG_FS,
+        r.usb_otg_fs,
         Irqs,
-        p.PA12,
-        p.PA11,
+        r.pa12,
+        r.pa11,
         &mut ep_out_buffer,
         config,
     );
@@ -82,7 +139,7 @@ async fn main(_spawner: Spawner) {
     // Create embassy-usb Config
     let mut config = embassy_usb::Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Sofar");
-    config.product = Some("USB-serial example");
+    config.product = Some("Bristlemouth mote");
     config.serial_number = Some("hermit");
 
     // Required for windows compatibility.
@@ -128,6 +185,11 @@ async fn main(_spawner: Spawner) {
         }
     };
 
+    join(usb_fut, echo_fut).await;
+}
+
+#[embassy_executor::task]
+async fn adin_spe_task(_spawner: Spawner, r: SpeResources, seed: u64) {
     const MAC: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
     const IP_ADDRESS: Ipv6Cidr = Ipv6Cidr::new(
         Ipv6Address([
@@ -138,40 +200,36 @@ async fn main(_spawner: Spawner) {
     static STATE: StaticCell<embassy_net_adin1110::State<8, 8>> = StaticCell::new();
     let state = STATE.init(embassy_net_adin1110::State::<8, 8>::new());
 
-    let spe_spi_cs_n = Output::new(p.PA15, Level::High, Speed::High);
-    let spe_spi_sclk = p.PB3;
-    let spe_spi_miso = p.PB4;
-    let spe_spi_mosi = p.PB5;
+    let spe_spi_cs_n = Output::new(r.pa15, Level::High, Speed::High);
+    let spe_spi_sclk = r.pb3;
+    let spe_spi_miso = r.pb4;
+    let spe_spi_mosi = r.pb5;
 
     // Don't turn the clock to high, clock must fit within the system clock as we get a runtime panic.
     let mut spi_config = SPI_Config::default();
     spi_config.frequency = Hertz(20_000_000);
 
     let spe_spi: SpeSpi = Spi::new(
-        p.SPI3,
+        r.spi3,
         spe_spi_sclk,
         spe_spi_mosi,
         spe_spi_miso,
-        p.GPDMA1_CH13,
-        p.GPDMA1_CH12,
+        r.gpdma1_ch13,
+        r.gpdma1_ch12,
         spi_config,
     );
     let spe_spi = SpeSpiCs::new(spe_spi, spe_spi_cs_n, Delay).unwrap();
 
-    let spe_int = exti::ExtiInput::new(p.PB8, p.EXTI8, Pull::None);
+    let spe_int = exti::ExtiInput::new(r.pb8, r.exti8, Pull::None);
 
-    let spe_reset_n = Output::new(p.PA0, Level::Low, Speed::Low);
+    let spe_reset_n = Output::new(r.pa0, Level::Low, Speed::Low);
 
-    let _spe_pwr_en = Output::new(p.PH1, Level::High, Speed::Low);
-    Timer::after_millis(2000).await;
+    let _spe_pwr_en = Output::new(r.ph1, Level::High, Speed::Low);
 
     let (device, runner) =
         embassy_net_adin1110::new(MAC, state, spe_spi, spe_int, spe_reset_n, true, false).await;
-    Timer::after_millis(2000).await;
     let eth_fut = runner.run();
 
-    let mut r = Rng::new(p.RNG, Irqs);
-    let seed = r.next_u64();
     let ip_cfg = embassy_net::Config::ipv6_static(StaticConfigV6 {
         address: IP_ADDRESS,
         gateway: None,
@@ -190,28 +248,5 @@ async fn main(_spawner: Spawner) {
 
     // Run everything concurrently.
     // If we had made everything `'static` above instead, we could do this using separate tasks instead.
-    join4(usb_fut, echo_fut, eth_fut, net_fut).await;
-}
-
-struct Disconnected {}
-
-impl From<EndpointError> for Disconnected {
-    fn from(val: EndpointError) -> Self {
-        match val {
-            EndpointError::BufferOverflow => panic!("Buffer overflow"),
-            EndpointError::Disabled => Disconnected {},
-        }
-    }
-}
-
-async fn echo<'d, T: Instance + 'd>(
-    class: &mut CdcAcmClass<'d, Driver<'d, T>>,
-) -> Result<(), Disconnected> {
-    let mut buf = [0; 64];
-    loop {
-        let n = class.read_packet(&mut buf).await?;
-        let data = &buf[..n];
-        info!("data: {:x}", data);
-        class.write_packet(data).await?;
-    }
+    join(eth_fut, net_fut).await;
 }
